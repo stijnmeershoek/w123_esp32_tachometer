@@ -22,7 +22,7 @@ const unsigned long timeoutUs = 500000;
 // Window of recent intervals. Trimming a third from each end discards up to
 // 4 bad intervals of 14 on the low side, which covers about two stray pulses
 // (each stray pulse splits a real interval into two short ones).
-const int numSamples = 14;
+const int numSamples = 12;
 const int minSamples = 6;          // need this many intervals before showing RPM
 
 // Round the displayed RPM to this step (hides 583 vs 584 flicker).
