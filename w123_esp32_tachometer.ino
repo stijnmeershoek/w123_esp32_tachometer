@@ -2,12 +2,22 @@
 // Mercedes W123 250 (6-Cylinder) ESP32-C3 Super Mini Tachometer
 // Hardware: 4N35 Optocoupler on GPIO 3, external 5.1K pull-up to 3.3V
 // Arduino IDE: set "USB CDC On Boot: Enabled" so Serial works over USB.
+// Display: 4-digit 7-segment HT16K33 on I2C, SDA = GPIO 6, SCL = GPIO 7.
+// Library: "HT16K33" by Rob Tillaart (Arduino Library Manager).
 //
-// Method: trimmed mean of the last 14 pulse intervals. Sort them, throw away
+// Method: trimmed mean of the last 12 pulse intervals. Sort them, throw away
 // the lowest and highest third, average the middle. Outliers (stray noise
 // pulses) land at the ends and are discarded; the average of the middle
 // smooths out cylinder-to-cylinder differences. No thresholds to tune.
 // ================================================================
+
+#include <Wire.h>
+#include <HT16K33.h>
+
+const int sdaPin = 6;
+const int sclPin = 7;
+
+HT16K33 display(0x70);   // I2C address with A0, A1, A2 pads open
 
 const int tachPin = 3;            // Connected to 4N35 Pin 5 (Collector)
 const float pulsesPerRev = 3.0;   // 6-cylinder, 4-stroke = 3 sparks per crank revolution
@@ -20,7 +30,7 @@ const unsigned long debounceUs = 3000;
 const unsigned long timeoutUs = 500000;
 
 // Window of recent intervals. Trimming a third from each end discards up to
-// 4 bad intervals of 14 on the low side, which covers about two stray pulses
+// 4 bad intervals of 12 on the low side, which covers about two stray pulses
 // (each stray pulse splits a real interval into two short ones).
 const int numSamples = 12;
 const int minSamples = 6;          // need this many intervals before showing RPM
@@ -52,8 +62,23 @@ void IRAM_ATTR onTachPulse() {
   portEXIT_CRITICAL_ISR(&mux);
 }
 
+void showRpm(int rpm) {
+  display.displayInt(rpm);     // right-aligned, no leading zeros
+}
+
+void showDashes() {
+  uint8_t dashes[4] = {HT16K33_MINUS, HT16K33_MINUS, HT16K33_MINUS, HT16K33_MINUS};
+  display.display(dashes);
+}
+
 void setup() {
   Serial.begin(115200);
+  Serial.setTxTimeoutMs(0);
+
+  Wire.begin(sdaPin, sclPin);  // must come before display.begin()
+  if (!display.begin()) Serial.println("Display not found");
+  display.setBrightness(15);   // 0 (dim) to 15 (bright)
+  display.displayColon(false); // make sure the colon is off
 
   // Internal pull-up stays on, in parallel with the external 5.1K.
   pinMode(tachPin, INPUT_PULLUP);
@@ -87,10 +112,12 @@ void loop() {
 
   if (stopped) {
     Serial.println("Frequency: 0.0 Hz | RPM: 0");
+    showRpm(0);
     return;
   }
   if (valid < minSamples) {
     Serial.println("Frequency: -- | RPM: -- (collecting)");
+    showDashes();
     return;
   }
 
@@ -116,4 +143,5 @@ void loop() {
   int rpm = (int)roundf(rpmExact / displayStep) * displayStep;
 
   Serial.printf("Frequency: %.1f Hz | RPM: %d\n", hz, rpm);
+  showRpm(rpm);
 }
