@@ -5,14 +5,35 @@
 // Display: 4-digit 7-segment HT16K33 on I2C, SDA = GPIO 6, SCL = GPIO 7.
 // Library: "HT16K33" by Rob Tillaart (Arduino Library Manager).
 //
-// Method: trimmed mean of the last 12 pulse intervals. Sort them, throw away
-// the lowest and highest third, average the middle. Outliers (stray noise
-// pulses) land at the ends and are discarded; the average of the middle
-// smooths out cylinder-to-cylinder differences. No thresholds to tune.
+// Method (useTrimmedMean = true): trimmed mean of the last numSamples pulse
+// intervals. Sort them, throw away 1/trimDivisor at the low end and the same
+// at the high end, average the middle. Outliers (stray noise pulses) land at
+// the ends and are discarded; the average of the middle smooths out
+// cylinder-to-cylinder differences. No thresholds to tune.
+//
+// Method (useTrimmedMean = false): no filtering, only the newest interval.
 // ================================================================
 
 #include <Wire.h>
 #include <HT16K33.h>
+
+// ======================== FILTER SETTINGS ========================
+// true  = trimmed mean (settings below)
+// false = raw reading from the newest pulse interval only
+const bool useTrimmedMean = true;
+
+// Number of recent intervals in the window. More = steadier but slower.
+const int numSamples = 12;
+
+// Fraction dropped from EACH end: 3 = a third, 4 = a fourth.
+// 0 = drop nothing (plain average). 1 and 2 are not allowed.
+const int trimDivisor = 4;
+
+// =================================================================
+
+// Intervals needed before showing RPM (trimmed mean only): a full window,
+// so the first reading is filtered as well as every later one.
+const int minSamples = numSamples;
 
 const int sdaPin = 6;
 const int sclPin = 7;
@@ -28,12 +49,6 @@ const unsigned long debounceUs = 3000;
 
 // Engine counts as stopped if no pulse for this long (0.5 s).
 const unsigned long timeoutUs = 500000;
-
-// Window of recent intervals. Trimming a third from each end discards up to
-// 4 bad intervals of 12 on the low side, which covers about two stray pulses
-// (each stray pulse splits a real interval into two short ones).
-const int numSamples = 12;
-const int minSamples = 6;          // need this many intervals before showing RPM
 
 // Round the displayed RPM to this step (hides 583 vs 584 flicker).
 const int displayStep = 5;
@@ -93,6 +108,7 @@ void loop() {
   delay(250);  // Refresh 4 times per second
 
   unsigned long buf[numSamples];
+  unsigned long newest = 0;
   int valid = 0;
   bool stopped;
 
@@ -107,36 +123,48 @@ void loop() {
     for (int i = 0; i < numSamples; i++) {
       if (intervals[i] > 0) buf[valid++] = intervals[i];
     }
+    // The newest interval sits just before the next write position
+    newest = intervals[(sampleIndex + numSamples - 1) % numSamples];
   }
   portEXIT_CRITICAL(&mux);
+
+  static bool blinkOn = false;
+  blinkOn = !blinkOn;                        // flips every pass (250 ms)
+  display.displayColon(stopped && blinkOn);  // blink = waiting, off = pulses
 
   if (stopped) {
     Serial.println("Frequency: 0.0 Hz | RPM: 0");
     showRpm(0);
     return;
   }
-  if (valid < minSamples) {
+  const int needed = useTrimmedMean ? minSamples : 1;
+  if (valid < needed) {
     Serial.println("Frequency: -- | RPM: -- (collecting)");
     showDashes();
     return;
   }
 
-  // Sort the window (insertion sort)
-  for (int i = 1; i < valid; i++) {
-    unsigned long key = buf[i];
-    int j = i - 1;
-    while (j >= 0 && buf[j] > key) {
-      buf[j + 1] = buf[j];
-      j--;
+  float avgInterval;
+  if (useTrimmedMean) {
+    // Sort the window (insertion sort)
+    for (int i = 1; i < valid; i++) {
+      unsigned long key = buf[i];
+      int j = i - 1;
+      while (j >= 0 && buf[j] > key) {
+        buf[j + 1] = buf[j];
+        j--;
+      }
+      buf[j + 1] = key;
     }
-    buf[j + 1] = key;
-  }
 
-  // Trimmed mean: drop the lowest and highest third, average the middle
-  int trim = valid / 3;
-  unsigned long sum = 0;
-  for (int i = trim; i < valid - trim; i++) sum += buf[i];
-  float avgInterval = (float)sum / (float)(valid - 2 * trim);
+    // Trimmed mean: drop the lowest and highest part, average the middle
+    int trim = (trimDivisor > 0) ? valid / trimDivisor : 0;
+    unsigned long sum = 0;
+    for (int i = trim; i < valid - trim; i++) sum += buf[i];
+    avgInterval = (float)sum / (float)(valid - 2 * trim);
+  } else {
+    avgInterval = (float)newest;
+  }
 
   float hz = 1000000.0f / avgInterval;
   float rpmExact = hz * 60.0f / pulsesPerRev;
